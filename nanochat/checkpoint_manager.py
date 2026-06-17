@@ -61,14 +61,20 @@ def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data,
 def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0):
     # Load the model state
     model_path = os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
     model_data = torch.load(model_path, map_location=device)
     # Load the optimizer state if requested
     optimizer_data = None
     if load_optimizer:
         optimizer_path = os.path.join(checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt")
+        if not os.path.exists(optimizer_path):
+            raise FileNotFoundError(f"Optimizer checkpoint not found: {optimizer_path}")
         optimizer_data = torch.load(optimizer_path, map_location=device)
     # Load the metadata
     meta_path = os.path.join(checkpoint_dir, f"meta_{step:06d}.json")
+    if not os.path.exists(meta_path):
+        raise FileNotFoundError(f"Metadata file not found: {meta_path}")
     with open(meta_path, "r", encoding="utf-8") as f:
         meta_data = json.load(f)
     return model_data, optimizer_data, meta_data
@@ -161,23 +167,25 @@ def load_model_from_dir(checkpoints_dir, device, phase, model_tag=None, step=Non
     model, tokenizer, meta_data = build_model(checkpoint_dir, step, device, phase)
     return model, tokenizer, meta_data
 
+_SOURCE_TO_DIR = {
+    "base": "base_checkpoints",
+    "sft": "chatsft_checkpoints",
+    "rl": "chatrl_checkpoints",
+}
+
 def load_model(source, *args, **kwargs):
-    model_dir = {
-        "base": "base_checkpoints",
-        "sft": "chatsft_checkpoints",
-        "rl": "chatrl_checkpoints",
-    }[source]
+    if source not in _SOURCE_TO_DIR:
+        raise ValueError(f"Unknown model source '{source}'. Must be one of: {', '.join(_SOURCE_TO_DIR)}")
+    model_dir = _SOURCE_TO_DIR[source]
     base_dir = get_base_dir()
     checkpoints_dir = os.path.join(base_dir, model_dir)
     return load_model_from_dir(checkpoints_dir, *args, **kwargs)
 
 def load_optimizer_state(source, device, rank, model_tag=None, step=None):
     """Load just the optimizer shard for a given rank, without re-loading the model."""
-    model_dir = {
-        "base": "base_checkpoints",
-        "sft": "chatsft_checkpoints",
-        "rl": "chatrl_checkpoints",
-    }[source]
+    if source not in _SOURCE_TO_DIR:
+        raise ValueError(f"Unknown model source '{source}'. Must be one of: {', '.join(_SOURCE_TO_DIR)}")
+    model_dir = _SOURCE_TO_DIR[source]
     base_dir = get_base_dir()
     checkpoints_dir = os.path.join(base_dir, model_dir)
     if model_tag is None:

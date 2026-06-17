@@ -13,8 +13,11 @@ Usage (drop-in replacement for FA3):
     # Inference (with KV cache)
     y = flash_attn.flash_attn_with_kvcache(q, k_cache, v_cache, k=k, v=v, ...)
 """
+import logging
 import torch
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -34,7 +37,8 @@ def _load_flash_attention_3():
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
         from kernels import get_kernel
         return get_kernel('varunneal/flash-attention-3').flash_attn_interface
-    except Exception:
+    except Exception as e:
+        logger.debug("Flash Attention 3 not available: %s", e)
         return None
 
 
