@@ -9,14 +9,13 @@ Or torchrun for training:
 torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --device-batch-size=16
 """
 
-import gc
 import argparse
 import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import time
-import wandb
 import torch
-from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
+from nanochat.common import print0, get_base_dir, COMPUTE_DTYPE
+from nanochat.training import TrainingContext, init_wandb, optimizer_step, update_lr_and_momentum, manage_gc, ema_loss, compute_mfu
 from nanochat.tokenizer import get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_model, load_optimizer_state
 from nanochat.loss_eval import evaluate_bpb
@@ -71,22 +70,16 @@ user_config = vars(args).copy()
 # -----------------------------------------------------------------------------
 
 # Compute init
-device_type = autodetect_device_type() if args.device_type == "" else args.device_type
-ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
-master_process = ddp_rank == 0
-print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
-synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
-get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
-if device_type == "cuda":
-    gpu_device_name = torch.cuda.get_device_name(0)
-    gpu_peak_flops = get_peak_flops(gpu_device_name)
-    print0(f"GPU: {gpu_device_name} | Peak FLOPS (BF16): {gpu_peak_flops:.2e}")
-else:
-    gpu_peak_flops = float('inf')  # MFU not meaningful for CPU/MPS
+ctx = TrainingContext(device_type=args.device_type)
+ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = ctx.ddp, ctx.ddp_rank, ctx.ddp_local_rank, ctx.ddp_world_size, ctx.device
+device_type = ctx.device_type
+master_process = ctx.master_process
+synchronize = ctx.synchronize
+get_max_memory = ctx.get_max_memory
+gpu_peak_flops = ctx.gpu_peak_flops
 
 # wandb logging init
-use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-sft", name=args.run, config=user_config)
+wandb_run = init_wandb(args.run, "nanochat-sft", master_process, user_config)
 
 # Flash Attention status
 if not HAS_FA3:
@@ -331,7 +324,6 @@ def get_muon_momentum(it):
 x, y = next(train_loader) # prefetch the very first batch of data
 min_val_bpb = float("inf")
 smooth_train_loss = 0 # EMA of training loss
-ema_beta = 0.9 # EMA decay factor
 total_training_time = 0 # total wall-clock time of training
 step = 0
 while True:
@@ -442,19 +434,8 @@ while True:
     # step the optimizer
     lrm = get_lr_multiplier(progress)
     muon_momentum = get_muon_momentum(step)
-    for group in optimizer.param_groups:
-        group["lr"] = group["initial_lr"] * lrm
-        if group['kind'] == 'muon':
-            group["momentum"] = muon_momentum
-    if scaler is not None:
-        scaler.unscale_(optimizer)
-        if is_ddp_initialized():
-            for v in scaler._found_inf_per_device(optimizer).values():
-                dist.all_reduce(v, op=dist.ReduceOp.MAX)
-        scaler.step(optimizer)
-        scaler.update()
-    else:
-        optimizer.step()
+    update_lr_and_momentum(optimizer, lrm, muon_momentum=muon_momentum)
+    optimizer_step(optimizer, scaler)
     model.zero_grad(set_to_none=True)
     synchronize()
     t1 = time.time()
@@ -465,12 +446,9 @@ while True:
     step += 1
 
     # logging
-    smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * train_loss.item() # EMA the training loss
-    debiased_smooth_loss = smooth_train_loss / (1 - ema_beta**(step + 1)) # debias the EMA
+    smooth_train_loss, debiased_smooth_loss = ema_loss(smooth_train_loss, train_loss.item(), step)
     pct_done = 100 * progress
-    tok_per_sec = int(args.total_batch_size / dt)
-    flops_per_sec = num_flops_per_token * args.total_batch_size / dt
-    mfu = 100 * flops_per_sec / (gpu_peak_flops * ddp_world_size)
+    tok_per_sec, flops_per_sec, mfu = compute_mfu(num_flops_per_token, args.total_batch_size, dt, gpu_peak_flops, ddp_world_size)
     if step > 10:
         total_training_time += dt # only count the time after the first 10 steps
     print0(f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | epoch: {current_epoch} | total time: {total_training_time/60:.2f}m")
@@ -487,14 +465,8 @@ while True:
             "train/epoch": current_epoch,
         })
 
-    # The garbage collector spends ~500ms scanning for cycles quite frequently.
-    # We manually manage it to avoid these pauses during training.
-    if step == 1:
-        gc.collect() # manually collect a lot of garbage from setup
-        gc.freeze() # freeze all currently surviving objects and exclude them from GC
-        gc.disable() # disable GC entirely except:
-    elif step % 5000 == 0: # every 5000 steps...
-        gc.collect() # manually collect, just to be safe for very long runs
+    # Manage GC: freeze after first step, periodically collect for long runs
+    manage_gc(step)
 
 # print a few more stats
 print0(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")
@@ -515,5 +487,5 @@ get_report().log(section="SFT", data=[
 ])
 
 # cleanup
-wandb_run.finish() # wandb run finish
-compute_cleanup()
+wandb_run.finish()
+ctx.cleanup()

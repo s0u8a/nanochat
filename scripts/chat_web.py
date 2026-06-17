@@ -44,7 +44,7 @@ from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse
 from pydantic import BaseModel
 from typing import List, Optional, AsyncGenerator
 from dataclasses import dataclass
-from nanochat.common import compute_init, autodetect_device_type
+from nanochat.training import TrainingContext
 from nanochat.checkpoint_manager import load_model
 from nanochat.engine import Engine
 
@@ -80,8 +80,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-device_type = autodetect_device_type() if args.device_type == "" else args.device_type
-ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+ctx = TrainingContext(device_type=args.device_type)
+device_type = ctx.device_type
 
 @dataclass
 class Worker:
