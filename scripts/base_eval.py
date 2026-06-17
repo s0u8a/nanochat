@@ -31,7 +31,8 @@ import tempfile
 import argparse
 import torch
 
-from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir, autodetect_device_type, download_file_with_lock
+from nanochat.common import print0, get_base_dir, download_file_with_lock
+from nanochat.training import TrainingContext
 from nanochat.tokenizer import HuggingFaceTokenizer, get_token_bytes
 from nanochat.checkpoint_manager import load_model
 from nanochat.core_eval import evaluate_task
@@ -195,8 +196,8 @@ def main():
         parser.error(f"Invalid eval modes: {invalid}. Valid: {valid_modes}")
 
     # Distributed / precision setup
-    device_type = autodetect_device_type() if args.device_type == '' else args.device_type
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+    ctx = TrainingContext(device_type=args.device_type)
+    ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = ctx.ddp, ctx.ddp_rank, ctx.ddp_local_rank, ctx.ddp_world_size, ctx.device
     # Load model and tokenizer
     is_hf_model = args.hf_path is not None
     if is_hf_model:
@@ -316,7 +317,7 @@ def main():
 
     get_report().log(section="Base model evaluation", data=report_data)
 
-    compute_cleanup()
+    ctx.cleanup()
 
 
 if __name__ == "__main__":

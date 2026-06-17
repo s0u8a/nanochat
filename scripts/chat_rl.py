@@ -19,10 +19,10 @@ torchrun --standalone --nproc_per_node=8 -m scripts.chat_rl -- --run=default
 import argparse
 import os
 import itertools
-import wandb
 import torch
 import torch.distributed as dist
-from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir, DummyWandb, autodetect_device_type
+from nanochat.common import print0, get_base_dir
+from nanochat.training import TrainingContext, init_wandb, update_lr_and_momentum
 from nanochat.checkpoint_manager import save_checkpoint, load_model
 from nanochat.engine import Engine
 from tasks.gsm8k import GSM8K
@@ -62,13 +62,12 @@ user_config = vars(args).copy()
 # -----------------------------------------------------------------------------
 
 # Init compute/precision
-device_type = autodetect_device_type() if args.device_type == "" else args.device_type
-ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
-master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
+ctx = TrainingContext(device_type=args.device_type)
+ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = ctx.ddp, ctx.ddp_rank, ctx.ddp_local_rank, ctx.ddp_world_size, ctx.device
+master_process = ctx.master_process
 
 # wandb logging init
-use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-rl", name=args.run, config=user_config)
+wandb_run = init_wandb(args.run, "nanochat-rl", master_process, user_config)
 
 # Init model and tokenizer
 model, tokenizer, meta = load_model("sft", device, phase="eval", model_tag=args.model_tag, step=args.model_step)
@@ -295,8 +294,7 @@ for step in range(num_steps):
 
     # Update the model parameters
     lrm = get_lr_multiplier(step)
-    for group in optimizer.param_groups:
-        group["lr"] = group["initial_lr"] * lrm
+    update_lr_and_momentum(optimizer, lrm)
     optimizer.step()
     model.zero_grad(set_to_none=True)
     wandb_run.log({
@@ -328,5 +326,5 @@ get_report().log(section="Chat RL", data=[
     user_config, # CLI args
 ])
 
-wandb_run.finish() # wandb run finish
-compute_cleanup()
+wandb_run.finish()
+ctx.cleanup()

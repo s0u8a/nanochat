@@ -11,9 +11,9 @@ torchrun --nproc_per_node=8 -m scripts.chat_eval -- -a ARC-Easy
 import argparse
 from functools import partial
 import torch
-import torch.distributed as dist
 
-from nanochat.common import compute_init, compute_cleanup, get_dist_info, print0, autodetect_device_type
+from nanochat.common import get_dist_info, print0
+from nanochat.training import TrainingContext, reduce_counters
 from nanochat.checkpoint_manager import load_model
 from nanochat.engine import Engine
 
@@ -66,13 +66,7 @@ def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_
     print()
 
     # Aggregate results across all ranks
-    if ddp:
-        num_passed_tensor = torch.tensor([num_passed], dtype=torch.long, device=device)
-        total_tensor = torch.tensor([total], dtype=torch.long, device=device)
-        dist.all_reduce(num_passed_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
-        num_passed = num_passed_tensor.item()
-        total = total_tensor.item()
+    num_passed, total = reduce_counters(num_passed, total, device, ddp)
 
     print0("=" * 50)
     print0(f"Final: {num_passed}/{total} ({100*num_passed/total:.2f}%)")
@@ -140,13 +134,7 @@ def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems
             total += 1
 
     # Aggregate results across all ranks
-    if ddp:
-        num_passed_tensor = torch.tensor([num_passed], dtype=torch.long, device=device)
-        total_tensor = torch.tensor([total], dtype=torch.long, device=device)
-        dist.all_reduce(num_passed_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
-        num_passed = num_passed_tensor.item()
-        total = total_tensor.item()
+    num_passed, total = reduce_counters(num_passed, total, device, ddp)
 
     average = num_passed/total
     print0(f"Final: {num_passed}/{total} ({100*average:.2f}%)")
@@ -194,8 +182,8 @@ if __name__ == "__main__":
     parser.add_argument('--device-type', type=str, default='', choices=['cuda', 'cpu', 'mps'], help='Device type for evaluation: cuda|cpu|mps. empty => autodetect')
     args = parser.parse_args()
 
-    device_type = autodetect_device_type() if args.device_type == "" else args.device_type
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+    ctx = TrainingContext(device_type=args.device_type)
+    ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = ctx.ddp, ctx.ddp_rank, ctx.ddp_local_rank, ctx.ddp_world_size, ctx.device
 
     model, tokenizer, meta = load_model(args.source, device, phase="eval", model_tag=args.model_tag, step=args.step)
     engine = Engine(model, tokenizer)
@@ -248,4 +236,4 @@ if __name__ == "__main__":
         chatcore_metric_dict,
     ])
 
-    compute_cleanup()
+    ctx.cleanup()

@@ -6,7 +6,7 @@ python -m scripts.chat_cli
 """
 import argparse
 import torch
-from nanochat.common import compute_init, autodetect_device_type
+from nanochat.training import TrainingContext
 from nanochat.engine import Engine
 from nanochat.checkpoint_manager import load_model
 
@@ -22,8 +22,8 @@ args = parser.parse_args()
 
 # Init the model and tokenizer
 
-device_type = autodetect_device_type() if args.device_type == "" else args.device_type
-ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+ctx = TrainingContext(device_type=args.device_type)
+device = ctx.device
 model, tokenizer, meta = load_model(args.source, device, phase="eval", model_tag=args.model_tag, step=args.step)
 
 # Special tokens for the chat state machine
