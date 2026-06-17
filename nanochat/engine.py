@@ -22,10 +22,13 @@ from nanochat.checkpoint_manager import load_model
 
 # -----------------------------------------------------------------------------
 # Calculator tool helpers
+class CalculatorTimeout(Exception):
+    pass
+
 @contextmanager
 def timeout(duration, formula):
     def timeout_handler(signum, frame):
-        raise Exception(f"'{formula}': timed out after {duration} seconds")
+        raise CalculatorTimeout(f"'{formula}': timed out after {duration} seconds")
 
     signal.signal(signal.SIGALRM, timeout_handler)
     signal.alarm(duration)

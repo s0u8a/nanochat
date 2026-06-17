@@ -391,6 +391,11 @@ def get_tokenizer():
     from nanochat.common import get_base_dir
     base_dir = get_base_dir()
     tokenizer_dir = os.path.join(base_dir, "tokenizer")
+    if not os.path.isdir(tokenizer_dir):
+        raise FileNotFoundError(
+            f"Tokenizer directory not found at {tokenizer_dir}. "
+            "Did you train the tokenizer? Run: python -m scripts.tok_train"
+        )
     # return HuggingFaceTokenizer.from_directory(tokenizer_dir)
     return RustBPETokenizer.from_directory(tokenizer_dir)
 
